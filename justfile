@@ -13,6 +13,8 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 # -----------------------------
 project_name := "terraform-lambda"
 aws_region := "us-west-2"
+aws_profile := ""
+aws_profile_flag := ""
 runtime := "python3.12"
 lambda_handler := "app.handler"
 
@@ -43,11 +45,10 @@ config:
 # -----------------------------
 setup:
   @echo "Creating venv + installing dev deps..."
-  python -m venv .venv
-  source .venv/bin/activate
-  pip install -U pip wheel setuptools
-  # Optional dev tooling (safe if missing files)
-  if [ -f "{{src_dir}}/requirements-dev.txt" ]; then pip install -r "{{src_dir}}/requirements-dev.txt"; fi
+  python3 -m venv .venv
+  . .venv/bin/activate && \
+    pip install -U pip wheel setuptools && \
+    if [ -f "{{src_dir}}/requirements-dev.txt" ]; then pip install -r "{{src_dir}}/requirements-dev.txt"; fi
   @echo "Done. Activate with: source .venv/bin/activate"
 
 clean:
@@ -60,7 +61,35 @@ clean:
 # -----------------------------
 run-local:
   @echo "Running handler locally (smoke test)..."
-  python -c "from {{src_dir}}.app import handler; print(handler({}, None))"
+  @if [ -f .venv/bin/python3 ]; then \
+    .venv/bin/python3 -c "import json; import sys; sys.path.insert(0, '{{src_dir}}'); from app import handler; result = handler({}, None); print(json.dumps(result, indent=2))"; \
+  else \
+    echo "Note: Virtual environment not found. Install dependencies first with: just setup"; \
+    PYTHONPATH={{src_dir}} python3 -c "import json; import sys; from app import handler; result = handler({}, None); print(json.dumps(result, indent=2))"; \
+  fi
+
+# Run handler with custom event JSON file
+# Usage: just run-local-event test-event.json
+run-local-event event_file:
+  @echo "Running handler with event from {{event_file}}..."
+  @if [ -f .venv/bin/python3 ]; then \
+    .venv/bin/python3 -c "import json; import sys; sys.path.insert(0, '{{src_dir}}'); from app import handler; event = json.load(open('{{event_file}}')); result = handler(event, None); print(json.dumps(result, indent=2))"; \
+  else \
+    PYTHONPATH={{src_dir}} python3 -c "import json; import sys; from app import handler; event = json.load(open('{{event_file}}')); result = handler(event, None); print(json.dumps(result, indent=2))"; \
+  fi
+
+# Install function dependencies locally (for testing)
+install-local:
+  @echo "Installing dependencies for local testing..."
+  @if [ ! -f .venv/bin/pip ]; then \
+    echo "Creating virtual environment..."; \
+    python3 -m venv .venv; \
+  fi
+  . .venv/bin/activate && pip install -q -r {{layer_dir}}/requirements.txt
+  @if [ -f {{src_dir}}/requirements.txt ] && [ -s {{src_dir}}/requirements.txt ]; then \
+    . .venv/bin/activate && pip install -q -r {{src_dir}}/requirements.txt; \
+  fi
+  @echo "Dependencies installed. Use: source .venv/bin/activate"
 
 # -----------------------------
 # Build: Layer
@@ -70,7 +99,7 @@ build-layer:
   rm -rf "{{layer_build_dir}}" "{{layer_zip}}"
   mkdir -p "{{layer_build_dir}}/python"
   docker run --rm \
-    -v "{{pwd}}":/var/task \
+    -v "$(pwd)":/var/task \
     -w /var/task \
     "{{lambda_build_image}}" \
     /bin/bash -lc "\
@@ -114,8 +143,12 @@ deploy-tf:
 # Otherwise they’ll print a helpful message and succeed.
 
 test:
-  @if command -v pytest >/dev/null 2>&1; then \
-    echo "Running pytest..."; pytest -q; \
+  @if [ -f .venv/bin/pytest ]; then \
+    echo "Running pytest..."; \
+    ./run_pytest.sh .venv/bin/pytest; \
+  elif command -v pytest >/dev/null 2>&1; then \
+    echo "Running pytest..."; \
+    ./run_pytest.sh pytest; \
   else \
     echo "pytest not installed. Add it to requirements-dev.txt and run: just setup"; \
   fi
